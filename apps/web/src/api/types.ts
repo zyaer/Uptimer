@@ -444,7 +444,11 @@ export interface MonitorTestResult {
   };
 }
 
-export interface WebhookChannelConfig {
+export type NotificationChannelPreset = 'custom' | 'telegram';
+export type TelegramParseMode = 'Markdown' | 'MarkdownV2' | 'HTML';
+
+export interface CustomWebhookChannelConfig {
+  preset?: 'custom';
   url: string;
   method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'HEAD';
   headers?: Record<string, string>;
@@ -467,6 +471,24 @@ export interface WebhookChannelConfig {
     secret_ref: string;
   };
 }
+
+export interface TelegramChannelConfig {
+  preset: 'telegram';
+  bot_token?: string;
+  bot_token_secret_ref?: string;
+  bot_token_configured?: boolean;
+  bot_token_source?: 'stored' | 'secret_ref';
+  chat_id: string;
+  message_thread_id?: number;
+  timeout_ms?: number;
+  message_template?: string;
+  enabled_events?: CustomWebhookChannelConfig['enabled_events'];
+  parse_mode?: TelegramParseMode;
+  disable_notification?: boolean;
+  protect_content?: boolean;
+}
+
+export type WebhookChannelConfig = CustomWebhookChannelConfig | TelegramChannelConfig;
 
 export interface NotificationChannel {
   id: number;

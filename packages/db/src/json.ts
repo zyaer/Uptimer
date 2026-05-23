@@ -63,6 +63,9 @@ export const webhookSigningSchema = z.object({
   secret_ref: z.string().min(1),
 });
 
+const notificationChannelTimeoutMsSchema = z.number().int().min(1).max(60000).optional();
+const notificationMessageTemplateSchema = z.string().min(1).max(10_000).optional();
+
 export const notificationEventTypeSchema = z.enum([
   'monitor.down',
   'monitor.up',
@@ -87,16 +90,17 @@ const webhookUrlSchema = z
     }
   }, 'url protocol must be http or https');
 
-export const webhookChannelConfigSchema = z
+export const customWebhookChannelConfigSchema = z
   .object({
+    preset: z.literal('custom').optional().default('custom'),
     url: webhookUrlSchema,
     method: z.enum(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD']).default('POST'),
     headers: z.record(z.string()).optional(),
-    timeout_ms: z.number().int().min(1).max(60000).optional(),
+    timeout_ms: notificationChannelTimeoutMsSchema,
     payload_type: z.enum(['json', 'param', 'x-www-form-urlencoded']).default('json'),
 
     // Optional message template used by $MSG / {{message}} in payload templating.
-    message_template: z.string().min(1).max(10_000).optional(),
+    message_template: notificationMessageTemplateSchema,
 
     // Optional payload template. Strings inside this JSON value may reference magic variables.
     payload_template: z.unknown().optional(),
@@ -134,4 +138,57 @@ export const webhookChannelConfigSchema = z
       }
     }
   });
+export type CustomWebhookChannelConfig = z.infer<typeof customWebhookChannelConfigSchema>;
+
+const workerSecretRefSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z_][A-Za-z0-9_]*$/, 'secret ref must be a valid Workers binding name');
+
+const telegramChatIdSchema = z.preprocess(
+  (value) => (typeof value === 'number' ? String(value) : value),
+  z.string().trim().min(1).max(256),
+);
+
+export const telegramChannelConfigSchema = z
+  .object({
+    preset: z.literal('telegram'),
+    bot_token_encrypted: z.string().min(1).max(8192).optional(),
+    bot_token_secret_ref: workerSecretRefSchema.optional(),
+    chat_id: telegramChatIdSchema,
+    message_thread_id: z.number().int().positive().optional(),
+    timeout_ms: notificationChannelTimeoutMsSchema,
+
+    // Optional message template used as Telegram sendMessage.text.
+    message_template: notificationMessageTemplateSchema,
+
+    // If omitted, the channel receives all events.
+    enabled_events: z.array(notificationEventTypeSchema).min(1).optional(),
+
+    parse_mode: z.enum(['Markdown', 'MarkdownV2', 'HTML']).optional(),
+    disable_notification: z.boolean().optional(),
+    protect_content: z.boolean().optional(),
+  })
+  .superRefine((val, ctx) => {
+    const hasEncryptedToken =
+      typeof val.bot_token_encrypted === 'string' && val.bot_token_encrypted.trim().length > 0;
+    const hasSecretRef =
+      typeof val.bot_token_secret_ref === 'string' && val.bot_token_secret_ref.trim().length > 0;
+
+    if (hasEncryptedToken === hasSecretRef) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['bot_token_encrypted'],
+        message: 'provide exactly one of bot_token_encrypted or bot_token_secret_ref',
+      });
+    }
+  });
+export type TelegramChannelConfig = z.infer<typeof telegramChannelConfigSchema>;
+
+export const webhookChannelConfigSchema = z.union([
+  customWebhookChannelConfigSchema,
+  telegramChannelConfigSchema,
+]);
 export type WebhookChannelConfig = z.infer<typeof webhookChannelConfigSchema>;

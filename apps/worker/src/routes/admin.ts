@@ -4,6 +4,7 @@ import { z } from 'zod';
 import {
   asc,
   eq,
+  type CustomWebhookChannelConfig,
   expectedStatusJsonSchema,
   getDb,
   httpHeadersJsonSchema,
@@ -13,6 +14,8 @@ import {
   parseDbJsonNullable,
   serializeDbJson,
   serializeDbJsonNullable,
+  type TelegramChannelConfig,
+  type WebhookChannelConfig,
   webhookChannelConfigSchema,
 } from '@uptimer/db';
 
@@ -40,6 +43,7 @@ import {
   dispatchWebhookToChannels,
   type WebhookChannel,
 } from '../notify/webhook';
+import { encryptTelegramBotToken } from '../notify/telegram-token';
 import { adminAnalyticsRoutes } from './admin-analytics';
 import { adminExportsRoutes } from './admin-exports';
 import { adminSettingsRoutes } from './admin-settings';
@@ -61,6 +65,8 @@ import {
 import {
   createNotificationChannelInputSchema,
   patchNotificationChannelInputSchema,
+  type TelegramChannelCreateInput,
+  type TelegramChannelPatchInput,
 } from '../schemas/notification-channels';
 
 export const adminRoutes = new Hono<{ Bindings: Env }>();
@@ -451,7 +457,10 @@ adminRoutes.post('/monitors', async (c) => {
       responseKeyword: input.type === 'http' ? (input.response_keyword ?? null) : null,
       responseKeywordMode:
         input.type === 'http'
-          ? normalizeAssertionModeForStorage(input.response_keyword ?? null, input.response_keyword_mode)
+          ? normalizeAssertionModeForStorage(
+              input.response_keyword ?? null,
+              input.response_keyword_mode,
+            )
           : null,
       responseForbiddenKeyword:
         input.type === 'http' ? (input.response_forbidden_keyword ?? null) : null,
@@ -544,7 +553,9 @@ adminRoutes.patch('/monitors/:id', async (c) => {
     input.response_keyword !== undefined ? input.response_keyword : existing.responseKeyword;
   const nextResponseKeywordMode = normalizeAssertionModeForStorage(
     nextResponseKeyword,
-    input.response_keyword_mode !== undefined ? input.response_keyword_mode : existing.responseKeywordMode,
+    input.response_keyword_mode !== undefined
+      ? input.response_keyword_mode
+      : existing.responseKeywordMode,
   );
   const nextResponseForbiddenKeyword =
     input.response_forbidden_keyword !== undefined
@@ -796,12 +807,106 @@ type NotificationChannelRow = {
   created_at: number;
 };
 
+type NotificationChannelInputConfig =
+  | CustomWebhookChannelConfig
+  | TelegramChannelCreateInput
+  | TelegramChannelPatchInput;
+
+type TelegramApiChannelConfig = Omit<TelegramChannelConfig, 'bot_token_encrypted'> & {
+  bot_token_configured: boolean;
+  bot_token_source: 'stored' | 'secret_ref';
+};
+
+type NotificationChannelApiConfig = CustomWebhookChannelConfig | TelegramApiChannelConfig;
+
+function isTelegramInputConfig(
+  config: NotificationChannelInputConfig,
+): config is TelegramChannelCreateInput | TelegramChannelPatchInput {
+  return config.preset === 'telegram';
+}
+
+function isTelegramStoredConfig(
+  config: WebhookChannelConfig | undefined,
+): config is TelegramChannelConfig {
+  return config?.preset === 'telegram';
+}
+
+async function normalizeNotificationConfigForStorage(
+  env: Env,
+  inputConfig: NotificationChannelInputConfig,
+  existingConfig?: WebhookChannelConfig,
+): Promise<WebhookChannelConfig> {
+  if (!isTelegramInputConfig(inputConfig)) {
+    return inputConfig;
+  }
+
+  const {
+    bot_token: botToken,
+    bot_token_secret_ref: botTokenSecretRef,
+    ...telegramConfig
+  } = inputConfig;
+  const baseTelegramConfig = isTelegramStoredConfig(existingConfig) ? existingConfig : undefined;
+
+  if (botToken) {
+    const adminToken = env.ADMIN_TOKEN?.trim();
+    if (!adminToken) {
+      throw new AppError(500, 'INTERNAL', 'Admin token not configured');
+    }
+
+    return {
+      ...telegramConfig,
+      bot_token_encrypted: await encryptTelegramBotToken(adminToken, botToken),
+    };
+  }
+
+  if (botTokenSecretRef) {
+    return {
+      ...telegramConfig,
+      bot_token_secret_ref: botTokenSecretRef,
+    };
+  }
+
+  if (baseTelegramConfig?.bot_token_encrypted) {
+    return {
+      ...telegramConfig,
+      bot_token_encrypted: baseTelegramConfig.bot_token_encrypted,
+    };
+  }
+
+  if (baseTelegramConfig?.bot_token_secret_ref) {
+    return {
+      ...telegramConfig,
+      bot_token_secret_ref: baseTelegramConfig.bot_token_secret_ref,
+    };
+  }
+
+  throw new AppError(400, 'INVALID_ARGUMENT', 'Telegram bot token is required');
+}
+
+function sanitizeNotificationConfigForApi(
+  config: WebhookChannelConfig,
+): NotificationChannelApiConfig {
+  if (!isTelegramStoredConfig(config)) {
+    return config;
+  }
+
+  const { bot_token_encrypted: encryptedToken, ...telegramConfig } = config;
+
+  return {
+    ...telegramConfig,
+    bot_token_configured: Boolean(encryptedToken || telegramConfig.bot_token_secret_ref),
+    bot_token_source: telegramConfig.bot_token_secret_ref ? 'secret_ref' : 'stored',
+  };
+}
+
 function notificationChannelRowToApi(row: NotificationChannelRow) {
+  const config = parseDbJson(webhookChannelConfigSchema, row.config_json, { field: 'config_json' });
+
   return {
     id: row.id,
     name: row.name,
     type: row.type,
-    config_json: parseDbJson(webhookChannelConfigSchema, row.config_json, { field: 'config_json' }),
+    config_json: sanitizeNotificationConfigForApi(config),
     is_active: row.is_active === 1,
     created_at: row.created_at,
   };
@@ -839,7 +944,8 @@ adminRoutes.post('/notification-channels', async (c) => {
 
   const now = Math.floor(Date.now() / 1000);
   const isActive = input.is_active ?? true;
-  const configJson = serializeDbJson(webhookChannelConfigSchema, input.config_json, {
+  const storageConfig = await normalizeNotificationConfigForStorage(c.env, input.config_json);
+  const configJson = serializeDbJson(webhookChannelConfigSchema, storageConfig, {
     field: 'config_json',
   });
 
@@ -885,9 +991,16 @@ adminRoutes.patch('/notification-channels/:id', async (c) => {
   const nextName = input.name ?? existing.name;
   const nextIsActive =
     input.is_active !== undefined ? (input.is_active ? 1 : 0) : existing.is_active;
+  const existingConfig = parseDbJson(webhookChannelConfigSchema, existing.config_json, {
+    field: 'config_json',
+  });
   const nextConfigJson =
     input.config_json !== undefined
-      ? serializeDbJson(webhookChannelConfigSchema, input.config_json, { field: 'config_json' })
+      ? serializeDbJson(
+          webhookChannelConfigSchema,
+          await normalizeNotificationConfigForStorage(c.env, input.config_json, existingConfig),
+          { field: 'config_json' },
+        )
       : existing.config_json;
 
   const updated = await c.env.DB.prepare(

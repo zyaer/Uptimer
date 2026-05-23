@@ -582,6 +582,7 @@ Webhook Channel `config_json`（建议字段）：
 
 ```json
 {
+  "preset": "custom",
   "url": "https://example.com/webhook",
   "method": "POST",
   "headers": { "Authorization": "Bearer xxx" },
@@ -600,6 +601,40 @@ Webhook Channel `config_json`（建议字段）：
   - `X-Uptimer-Timestamp: <unix seconds>`
   - `X-Uptimer-Signature: sha256=<hmac>`（对 `timestamp + "." + rawBody` 做 HMAC-SHA256）
 - 目的：让接收方可验证来源与防重放（接收方校验 timestamp 在允许窗口内）。
+
+Telegram Channel `config_json`（内置 preset）：
+
+默认 Admin API 输入：
+
+```json
+{
+  "preset": "telegram",
+  "bot_token": "123456789:AA...",
+  "chat_id": "@status_channel"
+}
+```
+
+D1 存储形态：
+
+```json
+{
+  "preset": "telegram",
+  "bot_token_encrypted": "v1:...",
+  "chat_id": "@status_channel",
+  "message_thread_id": 123,
+  "timeout_ms": 5000,
+  "message_template": "{{message}}",
+  "enabled_events": ["monitor.down", "monitor.up"],
+  "parse_mode": "HTML",
+  "disable_notification": false,
+  "protect_content": false
+}
+```
+
+- Telegram 告警是 Uptimer 向 Telegram Bot API 出站调用 `sendMessage`，不是 Telegram `setWebhook` 入站更新回调。
+- 默认路径允许管理员在 UI/API 输入 Bot Token；Worker 使用现有 `ADMIN_TOKEN` 派生密钥加密后，仅把 `bot_token_encrypted` 写入 D1。Admin API 响应不得回传明文或密文 token。
+- 轮换 `ADMIN_TOKEN` 后，已加密的 Telegram token 需要在后台重新保存。
+- 进阶路径仍支持 `bot_token_secret_ref`，只保存 Workers Secret binding 名称；适合希望在 D1 之外管理 Bot Token 的部署。
 
 ### 9.3 去重与重试
 
